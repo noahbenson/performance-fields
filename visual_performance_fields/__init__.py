@@ -26,17 +26,12 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         age-group, then agegroup[u] will be 28.
       * inferred_maps is a dictionary mapping subject IDs to retinotopic mapping properties as
         inferred by Bayesian inference (Benson and Winawer, 2018, DOI:10.7554/eLife.40224).
-      * cleaned_maps is a equivalent to inferred_maps but contains inferred retinotopic
-        parameters after a small amount of smoothing designed to even-out improbably cortical
-        magnification values. The value cleaned_maps[sid][h][p][k] is the property p ('polar_angle',
-        'eccentricity', 'radius', or 'visual_area') for vertex k*of the hemisphere h ('lh' or 'rh')
-        of subject sid.
       * v1_distance is a dictionary mapping subject IDs to properties that specify the distance from
         each (ventral/dorsal) V1 boundary. The value v1_distance[sid][h][vd][k] is the
         midgray-surface distance from vertex k to the vd ('ventral' or 'dorsal') V1 boundary of
         hemisphere h ('lh' or 'rh') of subject sid.
       * inferred_table is a dataframe summarizing the inferred retinotopic maps and the various data
-        related to them (cleaned data and distances).
+        related to them (distances).
       * subjects is a dictionary of subject objects, each of which contain, as properties or
         meta-data, the various data described above.
     '''
@@ -46,6 +41,8 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
     roi_angles_fine = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
     # The eccentricity ranges we look at:
     roi_eccens = ((0,1), (1,2), (2,3), (3,4), (4,5), (5,6), (6,7))
+    # The URL for the OSF page from which we download our data.
+    osf_url = 'osf://5gprz/'
 
     def __init__(self, url=None, cache_directory=Ellipsis,
                  meta_data=None, create_directories=True, create_mode=0o755):
@@ -65,7 +62,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         '''
         url is the URL from which the performance-fields data is loaded.
         '''
-        if url is None or url is Ellipsis: return 'osf://5gprz/'
+        if url is None or url is Ellipsis: return VisualPerformanceFieldsDataset.osf_url
         if not pimms.is_str(u): raise ValueError('url must be a string')
         return u
     @pimms.value
@@ -117,43 +114,6 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                                   for (k,v) in six.iteritems(inffiles)})
                    for h in ['lh','rh']}
              for sid in subject_list})
-    # How to calculate the cleaned maps
-    @staticmethod
-    def _generate_clean_maps(sid, h, infmaps):
-        import neuropythy as ny
-        import numpy as np
-        sub = ny.hcp_subject(sid)
-        hemi = sub.hemis[h]
-        # we use the inf-lowres-prf_* retinotopy data
-        irdat = infmaps[sid][h]
-        # get x/y and labels
-        lbl = irdat['inf_visual_area']
-        (iang,iecc) = ny.as_retinotopy(irdat, 'visual')
-        # get the mask
-        mask = np.where((iecc <= 7) & ((lbl == 1) | (lbl == 2)))[0]
-        # calculate the clean retinotopy
-        (ang, ecc) = ny.vision.clean_retinotopy(
-            hemi, 'prf_', visual_area=None, steps=[500]*5,
-            fieldsign_knob=6, rt_knob=None,
-            mask=mask, rounds=5, average=None, jitter=None)
-        res = {'clean_polar_angle':ang, 'clean_eccentricity':ecc}
-        return res
-    @pimms.value
-    def cleaned_maps(pseudo_path, subject_list):
-        '''
-        cleaned_maps is a nested-dictionary structure containing cleaned versions of the
-        measured retinotopic maps of the subjects in the HCP 7T Retinotopy Dataset.
-        '''
-        import os, six
-        from neuropythy.util import curry
-        from neuropythy import load
-        def _load_cleanmaps(sid,h):
-            flnm = pseudo_path.local_path('clean_maps', '%s_%s.mgz' % (sid,h))
-            (ang,ecc) = load(flnm)
-            return pimms.persist({'clean_polar_angle': ang, 'clean_eccentricity': ecc})
-        return pimms.persist({sid: pimms.lmap({h: curry(_load_cleanmaps, sid, h)
-                                               for h in ['lh','rh']})
-                              for sid in subject_list})
     @staticmethod
     def _generate_boundary_distances(sid, h, infmaps):
         import neuropythy as ny
@@ -226,7 +186,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                                                for h in ['lh','rh']})
                               for sid in subject_list})
     @staticmethod
-    def _generate_summary_table(infmaps, cleanmaps, bdists, subject_list):
+    def _generate_summary_table(infmaps, bdists, subject_list):
         import neuropythy as ny
         import six, numpy as np
         cols = ['sid','hemi','prf_polar_angle', 'prf_eccentricity', 'prf_variance_explained',
@@ -271,7 +231,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         dataset.
         '''
         f = VisualPerformanceFieldsDataset._generate_summary_table
-        return f(self.inferred_maps, self.cleaned_maps, self.boundary_distances, self.subject_list)
+        return f(self.inferred_maps, self.boundary_distances, self.subject_list)
     @pimms.value
     def summary_table(subject_list, pseudo_path):
         '''
@@ -283,32 +243,31 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         flnm = pseudo_path.local_path('summary_table.csv')
         return load(flnm)
     @staticmethod
-    def _generate_hemi(sid, h, infmaps, cleanmaps, bdists):
+    def _generate_hemi(sid, h, infmaps, bdists):
         import neuropythy as ny, six
         hem = ny.hcp_subject(sid).hemis[h]
-        cl = cleanmaps[sid][h]
         bi = infmaps[sid][h]
         ds = bdists[sid][h]
-        ps = dict(cl)
+        ps = {}
         for (k,v) in six.iteritems(ds): ps[k + '_distance'] = v
         for (k,v) in six.iteritems(bi): ps[k] = v
         return hem.with_prop(ps)
     @staticmethod
-    def _generate_subject(sid, infmaps, cleanmaps, bdists):
+    def _generate_subject(sid, infmaps, bdists):
         import neuropythy as ny, six
-        lh = VisualPerformanceFieldsDataset._generate_hemi(sid, 'lh', infmaps, cleanmaps, bdists)
-        rh = VisualPerformanceFieldsDataset._generate_hemi(sid, 'rh', infmaps, cleanmaps, bdists)
+        lh = VisualPerformanceFieldsDataset._generate_hemi(sid, 'lh', infmaps, bdists)
+        rh = VisualPerformanceFieldsDataset._generate_hemi(sid, 'rh', infmaps, bdists)
         return ny.hcp_subject(sid).with_hemi(lh=lh, rh=rh)
     @pimms.value
-    def subjects(inferred_maps, cleaned_maps, boundary_distances, subject_list):
+    def subjects(inferred_maps, boundary_distances, subject_list):
         '''
         subjects is a dictionary of subject objects for all subjects used in the visual performance
         fields dataset. All subject objects in the subejcts dict include property data on the native
-        hemispheres for inferred and cleaned retinotopic maps and for V1 boundary distances.
+        hemispheres for inferred retinotopic maps and for V1 boundary distances.
         '''
         from neuropythy.util import curry
         f = VisualPerformanceFieldsDataset._generate_subject
-        return pimms.lmap({sid: curry(f, sid, inferred_maps, cleaned_maps, boundary_distances)
+        return pimms.lmap({sid: curry(f, sid, inferred_maps, boundary_distances)
                            for sid in subject_list})
 
     # ROI-calculation Functions ####################################################################
@@ -681,12 +640,54 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
             return tt[k+'_x'].values + tt[k+'_y'].values
         dat = {
             para: {
-                k: tuple([x0[np.isfinite(x0)]
-                          for ang in VisualPerformanceFieldsDataset.roi_angles
-                          for x0 in [_dfsel(df, k, ang)]])
+                k: pimms.imm_array(
+                    [_dfsel(df, k, ang)
+                     for ang in VisualPerformanceFieldsDataset.roi_angles])
                 for k in ['surface_area_mm2', 'mean_thickness_mm', 'volume_mm3']}
             for para in ['horizontal','vertical','dorsal','ventral']
             for df in [ny.util.dataframe_select(DROI_table, boundary=para)]}
+        return pimms.persist(dat)
+    @pimms.value
+    def asymmetry(DROI_summary):
+        '''
+        asymmetry is a nested dictionary structure containing the surface-area asymmetry estimates
+        for each subject. The value asymmetry[k][a][sno] is the percent asymmetry between the axes
+        defined by comparison name k ('HMA' for HM:VM asymmetry, 'VMA' for LVM:UVM asymmetry,
+        'HVA_cumulative' for cumulative HM:VM asymmetry, or 'VMA_cumulative' for cumulative LVM:UVM
+        asymmetry), subject number sno (0-180 for the HCP subject whose ID is subject_list[sno]),
+        and angle-distance a (10, 20 30, 40, or 50 indicating the angle-wedge size in degrees of
+        polar angle).
+
+        Asymmetry is defined as (value1 - value2) / mean(value1, value2) where value1 and value2 are
+        either the horizontal and vertical ROI surface areas respectively or the lower-vetical
+        (dorsal) and upper-vertical (ventral) ROI surface areas respectively. The values reported
+        in this data structure are percent asymmetry: difference / mean * 100.
+        '''
+        import neuropythy as ny, six, numpy as np
+        quant = 'surface_area_mm2'
+        dat = {}
+        for (k,(k1,k2)) in zip(['HVA','VMA'], [('horizontal','vertical'), ('dorsal','ventral')]):
+            for iscum in [True,False]:
+                # Grab and prep the data.
+                ys1 = np.asarray(DROI_summary[k1][quant])
+                ys2 = np.asarray(DROI_summary[k2][quant])
+                if not iscum:
+                    res = []
+                    for ys in (ys1,ys2):
+                        (cum,yr) = (0, [])
+                        for yy in ys:
+                            yr.append(yy - cum)
+                            cum = yy
+                        res.append(yr)
+                    (ys1,ys2) = [np.asarray(u) for u in res]
+                # Calculate the asymmetries.
+                asym = []
+                for (y1,y2) in zip(ys1, ys2):
+                    mu = np.nanmean([y1, y2], axis=0)
+                    dy = y1 - y2
+                    asym.append(dy / mu * 100)
+                # Append the data
+                dat[k + '_cumulative' if iscum else k] = pimms.imm_array(asym)
         return pimms.persist(dat)
     
 neuropythy.datasets.core.add_dataset('visual_performance_fields',
