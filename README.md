@@ -1,8 +1,10 @@
 # Visual Performance Fields
 
-This repository documents the source code and analyses employed in the Visual Performance Fields
+This repository contains the source code and analyses employed in the Visual Performance Fields
 project of [Noah C. Benson](https://github.com/noahbenson), [Eline R. Kupers](https://github.com/elinekupers),
 Marissa Carrasco, and [Jonathan Winawer](https://github.com/WinawerLab) (2020).
+
+This README file explains how to get the docker-image running using the repository; however, for more complete documentation on the project, please visit the [OSF site](https://osf.io/5gprz/).
 
 ## Contents
 
