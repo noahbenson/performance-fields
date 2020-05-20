@@ -8,7 +8,7 @@ This README file explains how to get the docker-image running using the reposito
 
 ## Contents
 
-The relevant files in this repository fall into two categories: source dode and notebooks.
+The relevant files in this repository fall into two categories: source code and notebooks.
 
 * The source code is organized as a small python library in the `visual_performance_fields/`
   directory. The directory contains only one file, `__init__.py` which is run on library import.
