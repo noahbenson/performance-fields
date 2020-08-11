@@ -50,7 +50,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         if cdir is Ellipsis:
             cdir = neuropythy.config['visual_performance_fields_path']
         neuropythy.datasets.HCPMetaDataset.__init__(self, name='visual_performance_fields',
-                                                    cache_directory=cdir,
+                                                    cache_directory=cdir, cache_required=True,
                                                     meta_data=meta_data, create_mode=create_mode,
                                                     create_directories=create_directories)
         self.url = url
