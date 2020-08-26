@@ -232,16 +232,6 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         '''
         f = VisualPerformanceFieldsDataset._generate_summary_table
         return f(self.inferred_maps, self.boundary_distances, self.subject_list)
-    @pimms.value
-    def summary_table(subject_list, pseudo_path):
-        '''
-        summary_table is a dataframe that summarizes all of the data employed in the project for the
-        calculation of the various wedge ROIs. The table includes data for every vertex in the V1/V2
-        ROIs (between 0 and 7 degrees of eccentricity) of both hemispheres of all subjects.
-        '''
-        from neuropythy import load
-        flnm = pseudo_path.local_path('summary_table.csv')
-        return load(flnm)
     @staticmethod
     def _generate_hemi(sid, h, infmaps, bdists):
         import neuropythy as ny, six
@@ -271,11 +261,15 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                            for sid in subject_list})
 
     # ROI-calculation Functions ####################################################################
-    # These are methods that calculate the distance-based ROIs.
+    # These are methods that calculate the distance-based ROIs ("DROIs").
     @staticmethod
     def _generate_DROIs(sub, h, dist_prop, val_prop, ref_val, val_diff,
-                        masks=None, distance_masks=None, inv_prop=None):
+                        masks=None, distance_masks=None, inv_prop=None,
+                        method=None):
         import neuropythy as ny, numpy as np, six
+        if masks is None: masks = []
+        if method is None: method = 'mean'
+        if distance_masks is None: distance_masks = []
         hem = sub.hemis[h]
         # Get the distance:
         d0 = np.abs(hem.property(dist_prop)) # (abs makes a copy)
@@ -285,7 +279,6 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         # Get the property:
         v0 = hem.property(val_prop)
         if val_prop == 'prf_polar_angle' and h == 'rh': v0 = -v0
-        v  = np.abs(v0 - ref_val) - val_diff
         # Apply the distance masks; the masks are for deciding which vertices get
         # returned as part of the ROI while the distance masks are for calculating
         # the distance boundary; for the distance boundary we actually need both
@@ -295,29 +288,50 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         mask_ii = ii
         for mask in ([] if distance_masks is None else distance_masks):
             ii = np.intersect1d(ii, hem.mask(mask))
-        # clear out values that aren't in the distance mask; we clear them out of
-        # v (the value on which we're searching over for the distance)
-        ii = np.setdiff1d(hem.indices, ii)
-        v[ii] = np.nan
-        # Find edges that straddle the val_diff from the ref_val
-        (a,b) = hem.tess.indexed_edges
-        v = np.sign(v[a] * v[b])
-        ii = np.where(v == -1)[0]
-        # if there are fewer than 10 vertices, we abort; not enough to accurately
-        # determine the values:
         if len(ii) == 0: return []
-        (a,b) = (a[ii],b[ii])
-        # Okay, get the average distance at which the crossing occurs
-        d = np.mean([d0[a], d0[b]], axis=0)
-        d = np.mean(d)
-        # Before we find the vertices within this distance, we apply the masks so
-        # that we exclude only those vertices not in these masks
-        ii = np.setdiff1d(hem.indices, mask_ii)
-        d0[ii] = np.nan # nans are never less than d
-        ii = np.where(ny.util.nanle(d0, d))[0]
-        return ii #if len(ii) >= 10 else []
+        # We have two ways of doing this:
+        if method in ['mean','median']: # The old way:
+            v  = np.abs(v0 - ref_val) - val_diff
+            # clear out values that aren't in the distance mask; we clear them out of
+            # v (the value on which we're searching over for the distance)
+            ii = np.setdiff1d(hem.indices, ii)
+            v[ii] = np.nan
+            # Find edges that straddle the val_diff from the ref_val
+            (a,b) = hem.tess.indexed_edges
+            v = np.sign(v[a] * v[b])
+            ii = np.where(v == -1)[0]
+            # if there are 0 vertices, we abort.
+            if len(ii) == 0: return []
+            (a,b) = (a[ii],b[ii])
+            # Okay, get the average distance at which the crossing occurs
+            d = np.mean([d0[a], d0[b]], axis=0)
+            d = np.median(d) if method == 'median' else np.mean(d)
+            # Before we find the vertices within this distance, we apply the masks so
+            # that we exclude only those vertices not in these masks
+            ii = np.setdiff1d(hem.indices, mask_ii)
+            d0[ii] = np.nan # nans are never less than d
+            ii = np.where(ny.util.nanle(d0, d))[0]
+            return ii #if len(ii) >= 10 else []
+        elif method == 'sort':
+            # Sort all the vertices by their distance
+            ii = ii[np.argsort(d0[ii])]
+            # Find out where these values are above/below the ref val
+            v = np.abs(v0[ii] - ref_val) - val_diff
+            # Now we want to find the distance that minimizes the cumsum
+            v = np.cumsum(v)
+            mn = np.argmin(np.cumsum(v))
+            d = d0[ii[mn]]
+            # Before we find the vertices within this distance, we apply the masks so
+            # that we exclude only those vertices not in these masks
+            ii = np.setdiff1d(hem.indices, mask_ii)
+            d0[ii] = np.nan # nans are never less than d
+            ii = np.where(ny.util.nanle(d0, d))[0]
+            return ii #if len(ii) >= 10 else []
+        else:
+            raise ValueError("Unrecognized method: %s" % (method,))
     def generate_DROIs(self, sid, h, dist_prop, val_prop, ref_val, val_diff,
-                      masks=None, distance_masks=None, inv_prop=None):
+                       masks=None, distance_masks=None, inv_prop=None,
+                       method=None):
         '''
         generate_DROIs(sid, h, dist_prop, val_prop, ref_val, val_diff) yields a mask
           for the given subject/hemisphere that is based on the distance (which is
@@ -325,7 +339,8 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
           ref_val (the presumed value at distance = 0) to ref_val +/- val_diff.
         '''
         return _generate_DROIs(self.subjects[sid], h, dist_prop, ref_val, val_diff,
-                               masks=masks, distance_masks=distance_masks, inv_prop=inv_prop)
+                               masks=masks, distance_masks=distance_masks, inv_prop=inv_prop,
+                               method=method)
     @staticmethod
     def _vertical_DROI_from_ventral_dorsal(vnt, drs):
         '''
@@ -342,7 +357,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         return res
     @staticmethod
     def _generate_subject_DROI_boundary_data(sub, h, paradigm, angle_delta,
-                                             min_variance_explained=0,
+                                             min_variance_explained=0, method=None,
                                              eccentricity_range=(0,7), surface_area='midgray'):
         import neuropythy as ny, numpy as np, copy, six
         CLS = VisualPerformanceFieldsDataset
@@ -353,9 +368,9 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
             # This is the weird case: we handle it separately: just run the function
             # for both ventral and dorsal and concatenate the V1 parts
             (vnt,drs) = [CLS._generate_subject_DROI_boundary_data(sub, h, para, angle_delta,
-                                                          min_variance_explained=minvexpl,
-                                                          eccentricity_range=erng,
-                                                          surface_area=surface_area)
+                                                                  min_variance_explained=minvexpl,
+                                                                  eccentricity_range=erng,
+                                                                  surface_area=surface_area)
                          for para in ['ventral', 'dorsal']]
             f = CLS._vertical_DROI_from_ventral_dorsal
             return f(vnt, drs)
@@ -394,14 +409,64 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
             for m in masks: m.append(('inf_visual_area', 1))
             masks[0].append(('inf_polar_angle', 90, 180.1))
             masks[1].append(('inf_polar_angle', -0.1,  90))
+        elif paradigm == 'hventral':
+            dprop = 'horizontal_distance'
+            xprop = None
+            ref_angle = 90
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks[0].append(('inf_visual_area', 1))
+            masks[0].append(('inf_polar_angle', -0.1, 90))
+        elif paradigm == 'hdorsal':
+            dprop = 'horizontal_distance'
+            xprop = None
+            ref_angle = 90
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks[0].append(('inf_visual_area', 1))
+            masks[0].append(('inf_polar_angle', 90, 180.1))
+        elif paradigm == 'ventral_v1':
+            dprop = 'ventral_distance'
+            xprop = 'dorsal_distance'
+            ref_angle = 0
+            for m in masks: m.append(('inf_polar_angle', -0.1, 90))
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks[0].append(('inf_visual_area', 1))
+        elif paradigm == 'dorsal_v1':
+            dprop = 'dorsal_distance'
+            xprop = 'ventral_distance'
+            ref_angle = 180
+            for m in masks: m.append(('inf_polar_angle', 90, 180.1))
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks[0].append(('inf_visual_area', 1))
+        elif paradigm == 'ventral_v2':
+            dprop = 'ventral_distance'
+            xprop = 'dorsal_distance'
+            ref_angle = 0
+            for m in masks: m.append(('inf_polar_angle', -0.1, 90))
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks[0].append(('inf_visual_area', 2))
+        elif paradigm == 'dorsal_v2':
+            dprop = 'dorsal_distance'
+            xprop = 'ventral_distance'
+            ref_angle = 180
+            for m in masks: m.append(('inf_polar_angle', 90, 180.1))
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks = (masks[0],)
+            dmasks = (dmasks[0],)
+            masks[0].append(('inf_visual_area', 2))
         else: raise ValueError('unrecognized paradigm: %s' % (paradigm,))
         # Get the indices
         ii = []
         for (m, dm) in zip(masks, dmasks):
             kk = CLS._generate_DROIs(sub, h, dprop, 'prf_polar_angle', ref_angle, angle_delta,
-                                     masks=m, distance_masks=dm, inv_prop=xprop)
+                                     masks=m, distance_masks=dm, inv_prop=xprop, method=method)
             ii = np.union1d(ii, kk)
-        ii = np.array(ii, dtype='int')
+            ii = np.array(ii, dtype='int')
         # Grab the other data:
         if pimms.is_str(surface_area) and not surface_area.endswith('_surface_area'):
             surface_area = surface_area + '_surface_area'
@@ -413,7 +478,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                 'volume_mm3': vl,       'indices': ii,
                 'visual_area': hem.prop('inf_visual_area')[ii]}
     def generate_subject_DROI_boundary_data(self, sid, h, paradigm, angle_delta,
-                                            min_variance_explained=0,
+                                            min_variance_explained=0, method=None,
                                             eccentricity_range=(0,7), surface_area='midgray'):
         '''
         generate_subject_DROI_boundary_data(sid, h, paradigm, delta) yields a dict of data about the
@@ -423,21 +488,28 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         '''
         f = VisualPerformanceFieldsDataset._generate_subject_DROI_boundary_data
         return f(self.subjects[sid], h, paradigm, angle_delta, min_variance_explained=0,
-                 eccentricity_range=(0,7), surface_area='midgray')
+                 eccentricity_range=(0,7), surface_area='midgray', method=method)
     @staticmethod
     def _generate_subject_DROI_data(sub, h, angle_delta, results='summary',
+                                    min_variance_explained=0, method=None,
                                     eccentricity_range=(0,7), surface_area='midgray'):
         import neuropythy as ny, numpy as np, six
+        paradigms = ['ventral','dorsal','horizontal','hdorsal','hventral',
+                     'ventral_v1','ventral_v2','dorsal_v1','dorsal_v2']
         results = results.lower()
         f = VisualPerformanceFieldsDataset._generate_subject_DROI_boundary_data
-        (vnt,drs,hrz) = [f(sub, h, para, angle_delta,
-                           eccentricity_range=eccentricity_range,
-                           surface_area=surface_area)
-                         for para in ['ventral','dorsal','horizontal']]
+        (vnt,drs,hrz,hdrs,hvnt,vnt1,vnt2,drs1,drs2) = [
+            f(sub, h, para, angle_delta,
+              eccentricity_range=eccentricity_range, method=method,
+              min_variance_explained=min_variance_explained,
+              surface_area=surface_area)
+            for para in paradigms]
         # we don't need to run vertical because we can derive it from the other measures:
         ver = VisualPerformanceFieldsDataset._vertical_DROI_from_ventral_dorsal(vnt, drs)
         # depending on the results arg, we return these or their summaries
-        res = {'vertical': ver, 'horizontal': hrz, 'ventral': vnt, 'dorsal': drs}
+        res = {'vertical': ver, 'horizontal': hrz, 'ventral': vnt, 'dorsal': drs,
+               'hdorsal': hdrs, 'hventral': hvnt, 'ventral_v1': vnt1, 'dorsal_v1': drs1,
+               'ventral_v2': vnt2, 'dorsal_v2': drs2}
         if results == 'summary':
             fix = {'surface_area_mm2': np.nansum,
                    'volume_mm3': np.nansum,
@@ -447,6 +519,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         else:
             return res
     def generate_subject_DROI_data(self, sid, h, angle_delta, results='summary',
+                                   min_variance_explained=0, method=None,
                                    eccentricity_range=(0,7), surface_area='midgray'):
         '''
         generate_subject_DROI_data(sid, h, angle_delta) yields distance-based ROI data for
@@ -454,13 +527,15 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
           subject and hemisphere.
         '''
         return VisualPerformanceFieldsDataset._generate_subject_DROI_data(
-            self.subjects[sid], h, angle_delta, results=results,
-            eccentricity_range=eccentricity_range, surface_area=surface_area)
+            self.subjects[sid], h, angle_delta, results=results, method=method,
+            eccentricity_range=eccentricity_range, surface_area=surface_area,
+            min_variance_explained=min_variance_explained)
     @staticmethod
-    def _generate_subject_DROI_table(subjects, sid, angles=None, eccens=None):
+    def _generate_subject_DROI_table(subjects, sid, angles=None, eccens=None,
+                                     min_variance_explained=0, method=None):
         import neuropythy as ny, numpy as np, six
         if angles in (None, Ellipsis, 'fine', 'all'):
-            angles = VisualPerformanceFieldsDataset.roi_allangles
+            angles = VisualPerformanceFieldsDataset.roi_angles_fine
         elif angles == 'coarse':
             angles = VisualPerformanceFieldsDataset.roi_angles
         if eccens in (None, Ellipsis, 'all'):
@@ -472,7 +547,8 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
             # go through the eccen ranges and angles:
             for (ang,erng) in [(a,e) for a in angles for e in eccens]:
                 # get all the summary data:
-                alldat = f(sub, h, ang, eccentricity_range=erng)
+                alldat = f(sub, h, ang, eccentricity_range=erng, method=method,
+                           min_variance_explained=min_variance_explained)
                 for (para,dat) in six.iteritems(alldat):
                     # append to the appropriate columns:
                     tbl['sid'].append(sid)
@@ -484,21 +560,26 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                     for (k,v) in six.iteritems(dat):
                         tbl[k].append(v)
         return ny.to_dataframe(tbl)
-    def generate_subject_DROI_table(self, sid, angles=None, eccens=None):
+    def generate_subject_DROI_table(self, sid, angles=None, eccens=None, min_variance_explained=0,
+                                    method=None):
         """
         Calculate the distance-based ROIs for a single subject; indended for use with
         multiprocessing. This function will load the subject's data instead of running
         the calculation if the relevant data-file exists.
         """
         f = VisualPerformanceFieldsDataset._generate_subject_DROI_table
-        return f(self.subjects, sid, angles=angles, eccens=eccens)
+        return f(self.subjects, sid, angles=angles, eccens=eccens,
+                 min_variance_explained=min_variance_explained, method=method)
     @staticmethod
-    def _generate_subject_DROI_details(subjects, sid, h, eccentricity_range=None):
+    def _generate_subject_DROI_details(subjects, sid, h, eccentricity_range=None,
+                                       angles=None, min_variance_explained=0, method=None):
         from neuropythy.util import curry
         import six, pyrsistent as pyr, numpy as np
         paradigm_order = ['dorsal', 'ventral', 'vertical', 'horizontal']
         roi_eccens = VisualPerformanceFieldsDataset.roi_eccens
         roi_angles = VisualPerformanceFieldsDataset.roi_angles
+        if angles is None or angles is Ellipsis:
+            angles = roi_angles
         e = eccentricity_range
         if e is None or e is Ellipsis:
             e = list(VisualPerformanceFieldsDataset.roi_eccens)
@@ -514,51 +595,86 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                     else: u = np.concatenate(u)
                     r[k] = u
                 return pyr.pmap(r)
-            return pyr.pmap({k: pimms.lmap({a: curry(_merge, k, a) for a in roi_angles})
+            return pyr.pmap({k: pimms.lmap({a: curry(_merge, k, a) for a in angles})
                              for k in paradigm_order})
         f0 = VisualPerformanceFieldsDataset._generate_subject_DROI_data
-        f = lambda sid,h,k: f0(subjects[sid], h, k, eccentricity_range=e, results='all')
-        lm0 = pimms.lmap({k: curry(f, sid, h, k) for k in roi_angles})
-        pfn = lambda p: pimms.lmap({k:curry(lambda k:lm0[k][p], k) for k in roi_angles})
+        f = lambda sid,h,k: f0(subjects[sid], h, k, eccentricity_range=e, results='all',
+                               min_variance_explained=min_variance_explained, method=method)
+        lm0 = pimms.lmap({k: curry(f, sid, h, k) for k in angles})
+        pfn = lambda p: pimms.lmap({k:curry(lambda k:lm0[k][p], k) for k in angles})
         return pimms.lmap({p: curry(pfn, p) for p in paradigm_order})
-    def generate_subject_DROI_details(self, sid, h, eccentricity_range=None):
+    def generate_subject_DROI_details(self, sid, h, eccentricity_range=None, angles=None,
+                                      min_variance_explained=0, method=None):
         """
         Calculate the distance-based ROI details for a single subject. Details contain
         similar data as the subject's DROI table, but is in a nested dictionary format.
         """
         f = VisualPerformanceFieldsDataset._generate_subject_DROI_details
-        return f(self.subjects, sid, h, eccentricity_range=eccentricity_range)
-    def generate_DROI_tables(self, nprocs=None, printstatus=False):
+        return f(self.subjects, sid, h, eccentricity_range=eccentricity_range, angles=angles,
+                 min_variance_explained=min_variance_explained, method=method)
+    def generate_DROI_details(self, eccentricity_range=None, angles=None, min_variance_explained=0,
+                              method=None):
+        '''
+        generate_DROI_details() yields a set of lazily computed DROI detailed analyses; these
+        analyses are used to generate the DROI table(s).
+        '''
+        import six
+        from neuropythy.util import curry
+        f = curry(VisualPerformanceFieldsDataset._generate_subject_DROI_details, self.subjects)
+        m = {
+            sid: pimms.lmap(
+                {h: curry(f, sid, h, eccentricity_range=eccentricity_range, angles=angles,
+                          min_variance_explained=min_variance_explained, method=method)
+                 for h in ['lh','rh']})
+            for sid in six.iterkeys(self.subjects)}
+        return pimms.persist(m)
+    @staticmethod
+    def _generate_DROI_tables_call(tup):
+        import os, neuropythy as ny
+        # set our niceness!
+        os.nice(10)
+        flnm = os.path.join(tup[3], '%s.csv' % (tup[0],))
+        if os.path.isfile(flnm): return flnm
+        f = VisualPerformanceFieldsDataset._generate_subject_DROI_table
+        subjects = ny.data['visual_performance_fields'].subjects
+        tbl = f(subjects, tup[0], angles=tup[1], eccens=tup[2],
+                min_variance_explained=tup[4], method=tup[5])
+        ny.save(flnm, tbl)
+        return flnm
+    def generate_DROI_tables(self, nprocs=None, printstatus=False, angles=None, eccens=None,
+                             min_variance_explained=0, method=None, tempdir=None):
         '''
         generate_DROI_tables() recalculates the set of distance-based ROIs for each subject
         based on the data in the inferred maps and pRFs.
         '''
-        import neuropythy as ny, os, six, multithreading as mp
+        import neuropythy as ny, os, six, pyrsistent as pyr, multiprocessing as mp, numpy as np
         drois = {}
         subject_list = self.subject_list
         nsubs = len(subject_list)
-        f = VisualPerformanceFieldsDataset._generate_subject_DROI_tables
-        f = curry(f, self.subjects)
+        f = VisualPerformanceFieldsDataset._generate_DROI_tables_call
         if nprocs is None or nprocs is Ellipsis: nprocs = mp.cpu_count()
         if nprocs < 2: nprocs = 1
-        if nprocs == 1:
+        if nprocs > 1:
+            if tempdir is None: tdir = ny.util.tmpdir()
+            else: tdir = tempdir
             for ii in np.arange(0, nsubs, nprocs):
                 mx = np.min([len(subject_list), ii + nprocs])
                 if printstatus:
                     print("%2d - %3d%%" % ((ii + 1)/nsubs * 100, mx/nsubs * 100))
                 pool = mp.Pool(nprocs)
                 sids = subject_list[ii:ii+nprocs]
-                tbls = pool.map(f, sids)
+                tbls = pool.map(f, [(sid, angles, eccens, tdir, min_variance_explained, method)
+                                    for sid in sids])
                 pool.close()
                 # add these data into the overall roi table
                 for (sid,tbl) in zip(sids,tbls):
-                    drois[sid] = tbl
+                    drois[sid] = ny.load(tbl)
         else:
             for (ii,sid) in enumerate(subject_list):
                 if printstatus and ii % 10 == 9:
                     print('%3d (%d), %4.1f%%' % (ii, sid, ii/len(subject_list)*100.0))
-                drois[sid] = f(sid)
-        return pimms.persist(drois)
+                drois[sid] = f((sid, angles, eccens, tdir, min_variance_explained, method))
+        return pyr.pmap(drois)
     def generate_DROI_table(self):
         '''
         generate_DROI_table() is a method that recalculates the DROI summary table from the
@@ -608,20 +724,19 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         df = ny.load(pseudo_path.local_path('DROI_table.csv'))
         df.set_index(['sid','hemisphere'])
         return df
-    @pimms.value
-    def DROI_summary(DROI_table):
+    @staticmethod
+    def generate_DROI_summary(DROI_table, angles=None, eccens=None):
         '''
-        DROI_summary (distance-based ROI summary) is a nested-dictionary data structure that
-        provides easily-plottable summaries of the DROI_table. A value DROI_summary[b][k][u][s]
-        corresponds to the boundary b ('ventral', 'dorsal', 'vertical', or 'horizontal'), the
-        key k ('surface_area_mm2', 'mean_thickness_mm', or 'volume_mm3'), angle bin u (where 
-        u = 0, 1, 2, 3, 4 indicates 0-10, 10-20, 20-30, 30-40, 40-50 degrees away from the relevant
-        boundary), and subject s. Note that subject number is not necessarily consistent across
-        boundaries and keys as some subjects have no vertices in small ROIs and thus get excluded
-        from the relevant collections. All data are collapsed across eccentricities from 1-6
-        degrees.
+        generate_DROI_summary(table) converts the DROI table into a summary.
         '''
         import neuropythy as ny, numpy as np
+        if angles is None: angles = VisualPerformanceFieldsDataset.roi_angles
+        elif angles in ['fine', 'all']: angles = VisualPerformanceFieldsDataset.roi_angles_fine
+        # in eccens, by default, we exclude the foveal (0-1 degree) and peripheral (6-7 degree)
+        # eccentricity bands.
+        if eccens is None: eccens = VisualPerformanceFieldsDataset.roi_eccens[1:-1]
+        emns = [ee[0] for ee in eccens]
+        emxs = [ee[1] for ee in eccens]
         def _dfsel(df, k, ang, emns=[1,2,3,4,5], emxs=[2,3,4,5,6]):
             tbls = [ny.util.dataframe_select(df, angle_delta_deg=ang,
                                              min_eccentricity_deg=mn,
@@ -640,13 +755,26 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
             return tt[k+'_x'].values + tt[k+'_y'].values
         dat = {
             para: {
-                k: pimms.imm_array(
-                    [_dfsel(df, k, ang)
-                     for ang in VisualPerformanceFieldsDataset.roi_angles])
+                k: pimms.imm_array([_dfsel(df, k, ang, emns=emns, emxs=emxs) for ang in angles])
                 for k in ['surface_area_mm2', 'mean_thickness_mm', 'volume_mm3']}
-            for para in ['horizontal','vertical','dorsal','ventral']
+            for para in ['horizontal','vertical','dorsal','ventral','hdorsal','hventral',
+                         'dorsal_v1','ventral_v1','dorsal_v2','ventral_v2']
             for df in [ny.util.dataframe_select(DROI_table, boundary=para)]}
         return pimms.persist(dat)
+    @pimms.value
+    def DROI_summary(DROI_table):
+        '''
+        DROI_summary (distance-based ROI summary) is a nested-dictionary data structure that
+        provides easily-plottable summaries of the DROI_table. A value DROI_summary[b][k][u][s]
+        corresponds to the boundary b ('ventral', 'dorsal', 'vertical', or 'horizontal'), the
+        key k ('surface_area_mm2', 'mean_thickness_mm', or 'volume_mm3'), angle bin u (where 
+        u = 0, 1, 2, 3, 4 indicates 0-10, 10-20, 20-30, 30-40, 40-50 degrees away from the relevant
+        boundary), and subject s. Note that subject number is not necessarily consistent across
+        boundaries and keys as some subjects have no vertices in small ROIs and thus get excluded
+        from the relevant collections. All data are collapsed across eccentricities from 1-6
+        degrees.
+        '''
+        return VisualPerformanceFieldsDataset.generate_DROI_summary(DROI_table)
     @pimms.value
     def asymmetry(DROI_summary):
         '''
