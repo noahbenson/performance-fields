@@ -1,7 +1,7 @@
 ####################################################################################################
 # Visual Performance Fields Dataset Description
 # This file implements a neuropythy dataset object fo the visual performance
-# fields project by Benson, Kupers, Carrasco, and Winawer.
+# fields project by Benson, Kupers, Barbot, Carrasco, and Winawer.
 # By Noah C. Benson
 
 import neuropythy, pimms
