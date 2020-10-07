@@ -193,7 +193,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                 'prf_radius', 'visual_area', 'inf_polar_angle', 'inf_eccentricity',
                 'ventral', 'dorsal','ventral_distance', 'dorsal_distance']
         df = {k:[] for k in cols}
-        for sid in data.subject_list:
+        for sid in subject_list:
             sub = ny.hcp_subject(sid)
             for h in ('lh','rh'):
                 hemi  = sub.hemis[h]
