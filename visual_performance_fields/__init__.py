@@ -6,18 +6,32 @@
 
 import neuropythy, pimms
 
-#neuropythy.config.declare('visual_performance_fields_path',
-#                          environ_name='VISUAL_PERFORMANCE_FIELDS_PATH',
-#                          default_value=None, filter=neuropythy.datasets.hcp.to_nonempty_path)
 @pimms.immutable
 class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
     '''
     The VisualPerformanceFieldsDataset class declares the basic data structures and the functions
     for generating, loading, or preprocessing the visual performance fields dataset associated
-    with the paper by Benson, Kupers, Carrasco, and Winawer (2020).
+    with the paper by Benson, Kupers, Carrasco, and Winawer (2021) in the journal eLife. The 
+    dataset is typically accessed via the neuropythy library:
+    ```
+    import neuropythy as ny
+    ny.data['visual_performance_fields']
+    ```
+    This file, however, is part of the original project library, and thus its contents are
+    accessed via the `ny.data['visual_performance_fields_original']` value.
     
     This dataset contains the following members:
       * subject_list is a list of the subject IDs for each HCP subject analyzed in this notebook.
+      * roi_angles is a tuple of angle-widths for the distance-based ROIs around the V1/V2
+        boundary or around the V1 horizontal meridian.
+      * roi_eccens is a tuple of 2-tuples, each of which contains the (min_eccen, max_eccen) of
+        one eccentricity ring used in defining the distance-based ROIs.
+      * roi_angles_behavior and roi_eccens_behavior store the angles and eccentricities of the
+        behavior-matched distance-based ROIs examined in the paper.
+      * roi_angles_silva2018 and roi_eccens_silva2018 store the angles and eccentricities of the
+        distance-based ROIs that are matched to the Silva et al. (2018) paper.
+      * osf_url is the Open Science Framework URL for the project; this isn't an official URL, but
+        it has the format "osf://XXXXX/" where the XXXXX is the OSF-id of the project.
       * metadata_table is a pandas dataframe of all the meta-data (i.e., the HCP behavioral data)
         for each subject.
       * gender is a dictionary whose keys are subject IDs and whose values are either 'M' or 'F'.
@@ -25,22 +39,27 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         the middleof the age range for a particular subject. E.g., if  subject u is in the 26-30
         age-group, then agegroup[u] will be 28.
       * inferred_maps is a dictionary mapping subject IDs to retinotopic mapping properties as
-        inferred by Bayesian inference (Benson and Winawer, 2018, DOI:10.7554/eLife.40224).
-      * v1_distance is a dictionary mapping subject IDs to properties that specify the distance from
-        each (ventral/dorsal) V1 boundary. The value v1_distance[sid][h][vd][k] is the
-        midgray-surface distance from vertex k to the vd ('ventral' or 'dorsal') V1 boundary of
-        hemisphere h ('lh' or 'rh') of subject sid.
-      * inferred_table is a dataframe summarizing the inferred retinotopic maps and the various data
-        related to them (distances).
+        inferred by Bayesian inference (Benson and Winawer, 2018, DOI:10.7554/eLife.40224). This
+        dictionary is not used in the paper, but the data were used in analyses from earlier drafts
+        of the manuscript, so they are included.
       * subjects is a dictionary of subject objects, each of which contain, as properties or
-        meta-data, the various data described above.
+        meta-data, the sector information for each hemisphere.
+      * DROI_table is a dataframe of information about the distance-based ROIs examined in the
+        paper.
+      * DROI_behavior_table and DROI_silva2018_table are equivalent distance-based ROI dataframes
+        that are matched to the Barbot et al. (2020) data or the Silva et al. (2018) data.
+      * asymmetry is a nested data-structure that contains informationn about the asymmetry of the
+        ROIs examined in the paper.
+      * asymmetry_table is a dataframe of information about the asymmetries for each subject.
+      * barbot2020_data is a dictionary of data from Barbot et al. (2020) that is compared to the
+        surface areas of the distance-based ROIs.
+      * abrams2012_data is a dictionary of data from Abrams et al. (2012).
     '''
     
     # Constants / Magic Numbers ####################################################################
     roi_angles = (10, 20, 30, 40, 50)
     roi_angles_behavior = (7.5, 22.5, 37.5, 45)
     roi_angles_silva2018 = (5.625, 16.875,  28.125,  39.375, 45)
-    roi_angles_fine = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
     roi_eccens = ((1,2), (2,3), (3,4), (4,5), (5,6), (6,7))
     roi_eccens_behavior = (4, 5)
     roi_eccens_silva2018 = ((1,2), (2,3), (3,4), (4,5), (5,6))
@@ -54,7 +73,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         cdir = cache_directory
         if cdir is Ellipsis:
             cdir = neuropythy.config['visual_performance_fields_path']
-        neuropythy.datasets.HCPMetaDataset.__init__(self, name='visual_performance_fields',
+        neuropythy.datasets.HCPMetaDataset.__init__(self, name='visual_performance_fields_original',
                                                     cache_directory=cdir, cache_required=True,
                                                     meta_data=meta_data, create_mode=create_mode,
                                                     create_directories=create_directories)
@@ -134,7 +153,6 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
           (10, 20, 30, 40, 50).
         '''
         if angs is None or angs is Ellipsis: return VisualPerformanceFieldsDataset.roi_angles
-        elif pimms.is_str(ang) and ang == 'fine': return VisualPerformanceFieldsDataset.roi_angles_fine
         else: return tuple(angs)
     @pimms.param
     def eccens(eccs):
@@ -244,8 +262,8 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         return f(self.hcp_data, sid, h, scts, skey)
     @staticmethod
     def _sector_labels(hcp_data, pseudo_path, tag, sid, h, sectors, key):
-        import neuropythy as ny
-        try:                cpath = pseudo_path.local_path('sectors%s' % tag, '%s.mgz' % (sid,))
+        import neuropythy as ny, numpy as np
+        try:                cpath = pseudo_path.local_path('sectors%s' % tag, '%s.%s.mgz' % (h,sid))
         except ValueError:  cpath = None
         if cpath is None:
             return VisualPerformanceFieldsDataset._generate_sector_labels(
@@ -788,7 +806,7 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         if os.path.isfile(flnm): return flnm
         f = VisualPerformanceFieldsDataset._generate_subject_DROI_table
         #dd = ny.data['visual_performance_fields']
-        dd = ny.data['vpf']
+        dd = ny.data['visual_performance_fields_original']
         subjects = dd.subjects
         bins = tup[1]
         (sctlbl,skey) = (
@@ -944,6 +962,75 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
         '''
         return VisualPerformanceFieldsDataset.generate_DROI_summary(DROI_table)
     @pimms.value
+    def DROI_behavior_tables(subject_list, pseudo_path):
+        '''
+        DROI_behavior_tables (distance-based regions of interest) is a dictionary of ROIS used in
+        the visual performance field project. It is similar to DROI_tables, but it uses ROIs that
+        are matched to the Barbot et al. (2020) measurements.
+        '''
+        import neuropythy as ny, os, six
+        # Load one subject.
+        def _load_DROI(sid):
+            # get a subject-specific cache_path
+            cpath = pseudo_path.local_path('DROIs_behavior', '%s.csv' % (sid,))
+            return ny.load(cpath)
+        return pimms.lmap({sid: ny.util.curry(_load_DROI, sid) for sid in subject_list})
+    @pimms.value
+    def DROI_behavior_table(pseudo_path):
+        '''
+        DROI_behavior_table (distance-based ROI table) is a dataframe summarizing all the data from
+        all the hemispheres and all the distance-based wedge ROIs used in the visual performance fields
+        project. Like DROI_table, but using the bejavior-matched DROIs.
+        '''
+        import neuropythy as ny
+        df = ny.load(pseudo_path.local_path('DROI_table_behavior.csv'))
+        df.set_index(['sid','hemisphere'])
+        return df
+    @pimms.value
+    def DROI_behavior_summary(DROI_behavior_table):
+        '''
+        DROI_behavior_summary (distance-based ROI summary) is a nested-dictionary data structure
+        like DROI_summary, but that uses the DROIs matched to the behavioral data from Barbot et al.
+        (2020).
+        '''
+        return VisualPerformanceFieldsDataset.generate_DROI_summary(DROI_behavior_table,
+                                                                    bins='behavior')
+    @pimms.value
+    def DROI_silva2018_tables(subject_list, pseudo_path):
+        '''
+        DROI_behavior_tables (distance-based regions of interest) is a dictionary of ROIS used in
+        the visual performance field project. It is similar to DROI_tables, but it uses ROIs that
+        are matched to Figure 4 from Silva et al. (2018).
+        '''
+        import neuropythy as ny, os, six
+        # Load one subject.
+        def _load_DROI(sid):
+            # get a subject-specific cache_path
+            cpath = pseudo_path.local_path('DROIs_silva2018', '%s.csv' % (sid,))
+            return ny.load(cpath)
+        return pimms.lmap({sid: ny.util.curry(_load_DROI, sid) for sid in subject_list})
+    @pimms.value
+    def DROI_silva2018_table(pseudo_path):
+        '''
+        DROI_silva2018_table (distance-based ROI table) is a dataframe summarizing all the data from
+        all the hemispheres and all the distance-based wedge ROIs used in the visual performance
+        fields project. Like DROI_table, but using the DROIs matched to Figure 4 of Silva et al.
+        (2018).
+        '''
+        import neuropythy as ny
+        df = ny.load(pseudo_path.local_path('DROI_table_silva2018.csv'))
+        df.set_index(['sid','hemisphere'])
+        return df
+    @pimms.value
+    def DROI_silva2018_summary(DROI_silva2018_table):
+        '''
+        DROI_silva2018_summary (distance-based ROI summary) is a nested-dictionary data structure
+        like DROI_summary, but that uses the DROIs matched to the Figure 4 from Silva et al.
+        (2018).
+        '''
+        return VisualPerformanceFieldsDataset.generate_DROI_summary(DROI_silva2018_table,
+                                                                    bins='silva2018')
+    @pimms.value
     def asymmetry(DROI_summary):
         '''
         asymmetry is a nested dictionary structure containing the surface-area asymmetry estimates
@@ -985,6 +1072,368 @@ class VisualPerformanceFieldsDataset(neuropythy.datasets.HCPMetaDataset):
                 # Append the data
                 dat[k + '_cumulative' if iscum else k] = pimms.imm_array(asym)
         return pimms.persist(dat)
-    
-neuropythy.datasets.core.add_dataset('vpf',
+    @pimms.value
+    def asymmetry_table(asymmetry, agegroup, gender, subject_list):
+        '''
+        asymmetry_table is a pandas dataframe of asymmetry data for each subject
+        that is organized by age-group and gender. In order for this table to
+        be available, you must have access to the HCP restricted data, and 
+        neuropythy must be configured to use it; otherwise an error will be
+        raised.
+        '''
+        import neuropythy as ny
+        import numpy as np
+        # We can start by grabbing the subject ages and genders in the same order as
+        # is used in data.asymmetry, which tracks the HVA and VMA of each subject.
+        # This order is the same as that given in data.subject_list.
+        agegroups = [agegroup[sid] for sid in subject_list]
+        genders   = [gender[sid]   for sid in subject_list]
+
+        # Now we just make a dataframe; all the columns are already ordered by subject
+        # ID so we can just put them together. We do, however, need to expand each
+        # column by the wedge-size because we are flattening that dimension out into
+        # a single column.
+        angle_col = 'ROI Width [deg polar angle]'
+        age_col = 'Age-Group [years]'
+        gender_col = 'Gender'
+        data_cols = ['Local HVA', 'Cumulative HVA', 'Local VMA', 'Cumulative VMA']
+        data_cols = [d + ' [%]' for d in data_cols]
+        data_keys = ['HVA', 'HVA_cumulative', 'VMA', 'VMA_cumulative']
+        nsubs = len(subject_list)
+        
+        df = {}
+        roi_angles = VisualPerformanceFieldsDataset.roi_angles
+        df[angle_col]  = np.reshape([np.full(nsubs, k) for k in roi_angles], -1)
+        df['sid']      = np.reshape([subject_list for k in roi_angles], -1)
+        df[gender_col] = np.reshape([genders           for k in roi_angles], -1)
+        df[age_col]    = np.reshape([agegroups         for k in roi_angles], -1)
+        for (col,k) in zip(data_cols, data_keys):
+            df[col] = asymmetry[k].flatten()
+        df = ny.to_dataframe(df)
+        df = df[['sid',age_col,gender_col,angle_col] + data_cols]
+        df.set_index('sid')
+        return df
+    @pimms.value
+    def barbot2020_data(pseudo_path):
+        '''
+        Load and return the data from Barbot et al. (2020).
+        '''
+        import os, numpy as np, pyrsistent as pyr
+        from scipy.io import loadmat
+        filename = pseudo_path.local_path('supp', 'barbot_xue_carrasco_2020.mat')
+        pp_raw = loadmat(filename)
+        pp_dat = pp_raw['DATA']
+        pp_dat = {nm: pp_dat[nm][0,0].T for nm in pp_dat.dtype.names}
+        behavior_mtx = 10**pp_dat['SF_75THRESH_ALL']
+        behavior_mean = np.mean(behavior_mtx, axis=1)
+        behavior_sem = np.sqrt(np.var(behavior_mtx, axis=1) / behavior_mtx.shape[1])
+        behavior_angs = pp_dat['ANGLES_RHM0_UVM90_LHM180_LVM270'].flatten().astype('float')
+        behavior_angs = np.mod(90 - behavior_angs + 180, 360) - 180
+        result = {'raw': pp_raw, 'matrix': behavior_mtx,
+                  'mean': behavior_mean, 'sem': behavior_sem,
+                  'angles': behavior_angs}
+        return pyr.pmap(result)
+    @pimms.value
+    def abrams2012_data(pseudo_path):
+        '''
+        Load and return the data from Abrams et al. (2012).
+        '''
+        import os, numpy as np, pyrsistent as pyr
+        from scipy.io import loadmat
+        filename = pseudo_path.local_path('supp', 'abrams_nizam_carrasco_2012.mat')
+        pp_raw = loadmat(filename)
+        pp_dat = pp_raw['DATA']
+        pp_dat = {nm: pp_dat[nm][0,0].T for nm in pp_dat.dtype.names}
+        behavior_mtx = pp_dat['CS_75THRESH']
+        behavior_mean = np.mean(behavior_mtx, axis=1)
+        behavior_sem = np.sqrt(np.var(behavior_mtx, axis=1) / behavior_mtx.shape[1])
+        behavior_angs = pp_dat['ANGLES'].flatten().astype('float')
+        behavior_angs = np.mod(90 - behavior_angs + 180, 360) - 180
+        result = {'raw': pp_raw, 'matrix': behavior_mtx,
+                  'mean': behavior_mean, 'sem': behavior_sem,
+                  'angles': behavior_angs}
+        return pyr.pmap(result)
+
+    # Tables for Plotting or General Summary #######################################################
+    @staticmethod
+    def _cortex_V1_mask(hem, skey):
+        import numpy as np
+        ii = hem.indices
+        v1_sectors = tuple([lbl for (k,lbl) in skey.items()
+                            if k[0] == 1 if k[3] >= 1 if k[4] <= 6])
+        v1_sectors = np.array(v1_sectors)
+        return np.isin(hem.prop('vpf_sector'), v1_sectors)
+    @staticmethod
+    def _subject_V1_surface_area(subjects, skey, sid, h, area_property='midgray_surface_area'):
+        import numpy as np
+        hem = subjects[sid].hemis[h]
+        ii = VisualPerformanceFieldsDataset._cortex_V1_mask(hem, skey)
+        return np.nansum(hem.property(area_property, mask=ii))
+    @staticmethod
+    def _subject_V1_thickness(subjects, skey, sid, h):
+        import numpy as np
+        hem = subjects[sid].hemis[h]
+        ii = VisualPerformanceFieldsDataset._cortex_V1_mask(hem, skey)
+        return np.nanmean(hem.property('thickness', mask=ii))
+    @staticmethod
+    def _subject_V1_volume(subjects, skey, sid, h, area_property='midgray_surface_area'):
+        import numpy as np
+        hem = subjects[sid].hemis[h]
+        ii = VisualPerformanceFieldsDataset._cortex_V1_mask(hem, skey)
+        area = hem.property(area_property, mask=ii)
+        thic = hem.property('thickness', mask=ii)
+        return np.nansum(area * thic)
+    @staticmethod
+    def _subject_cortex_surface_area(subjects, sid, h, area_property='midgray_surface_area'):
+        import numpy as np
+        hem = subjects[sid].hemis[h]
+        ii = hem.mask('cortex_label')
+        return np.nansum(hem.property(area_property, mask=ii))
+    @staticmethod
+    def _subject_cortex_volume(subjects, sid, h, area_property='midgray_surface_area'):
+        import numpy as np
+        hem = subjects[sid].hemis[h]
+        ii = hem.mask('cortex_label')
+        area = hem.property(area_property, mask=ii)
+        thic = hem.property('thickness', mask=ii)
+        return np.nansum(area * thic)
+    @staticmethod 
+    def _generate_restricted_v1_summary_call(tup):
+        try:
+            import neuropythy as ny, numpy as np
+            #data = ny.data['visual_performance_fields']
+            data = ny.data['visual_performance_fields_original']
+            subjects = data.subjects
+            skey = data.sector_key[0]
+            CLS = VisualPerformanceFieldsDataset
+            (sid, saprop) = tup
+            res = []
+            for h in ['lh','rh']:
+                v1sa = CLS._subject_V1_surface_area(subjects, skey, sid, h, area_property=saprop)
+                v1vo = CLS._subject_V1_volume(subjects, skey, sid, h, area_property=saprop)
+                cxsa = CLS._subject_cortex_surface_area(subjects, sid, h, area_property=saprop)
+                cxvo = CLS._subject_cortex_volume(subjects, sid, h, area_property=saprop)
+                v1th = CLS._subject_V1_thickness(subjects, skey, sid, h)
+                res.append((v1sa, v1vo, cxsa, cxvo, v1th))
+            return tuple(res)
+        except Exception as e:
+            import numpy as np, sys, os
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            return ((np.nan, fname, exc_tb.tb_lineno, str(type(e)), str(e.args[0])),
+                    (np.nan, fname, exc_tb.tb_lineno, str(type(e)), str(e.args[0])))
+    @staticmethod
+    def _generate_restricted_v1_summary_table(subjects, gender, agegroup,
+                                              surface_area='midgray_surface_area',
+                                              printstatus=False, nprocs=None):
+        '''
+        Generates and returns the summary table of V1 measurements regarding the
+        1-6 degree eccentricity ROI. The resulting dataframe is formatted in a
+        way that is deliberately friendly to seaborn. The resulting summary
+        includes HCP restricted data.
+        '''
+        import neuropythy as ny, os, six, pyrsistent as pyr, multiprocessing as mp, numpy as np
+        subject_list = subjects.keys()
+        nsubs = len(subject_list)
+        f = VisualPerformanceFieldsDataset._generate_restricted_v1_summary_call
+        if nprocs is None or nprocs is Ellipsis: nprocs = mp.cpu_count()
+        if nprocs < 2: nprocs = 1
+        dat = ny.auto_dict(None, [])
+        if printstatus:
+            print('V1 Summary Processing blocks:')
+        for ii in np.arange(0, nsubs, nprocs):
+            mx = np.min([nsubs, ii + nprocs])
+            sids = subject_list[ii:mx]
+            if printstatus:
+                print("  * %2d - %3d%% progress" % ((ii + 1)/nsubs * 100, mx/nsubs * 100))
+            with mp.Pool(nprocs) as pool:
+                sids = subject_list[ii:ii+nprocs]
+                tups = pool.map(f, [(sid,surface_area) for sid in sids])
+            # add these data into the overall roi table
+            for (sid,hemtups) in zip(sids,tups):
+                for (h, tup) in zip(['lh','rh'], hemtups):
+                    dat['sid'].append(sid)
+                    dat['Gender'].append(gender[sid])
+                    dat['Age'].append(agegroup[sid])
+                    dat['Hemisphere'].append(h)
+                    (v1sa, v1vo, cxsa, cxvo, v1th) = tup
+                    if np.isnan(v1sa):
+                        raise ValueError('Subject %s, hemi %s, raised nan' % (sid, h), cxvo, v1th, v1vo, cxsa)
+                    dat[r'V1 Surface Area [cm$^2$]'].append(v1sa / 100.0)
+                    dat[r'V1 Gray Volume [cm$^3$]'].append(v1vo / 1000.0)
+                    dat[r'Mean V1 Gray Thickness [mm]'].append(v1th)
+                    dat[r'Cortex Surface Area [cm$^2$]'].append(cxsa / 100.0)
+                    dat[r'Cortex Gray Volume [cm$^3$]'].append(cxvo / 1000.0)
+                    dat[r'Normalized V1 Surface Area [%]'].append(v1sa / cxsa * 100)
+                    dat[r'Normalized V1 Gray Volume [%]'].append(v1vo / cxvo * 100)
+        return ny.to_dataframe(dat)
+    def generate_restricted_v1_summary_table(self, surface_area='midgray_surface_area',
+                                  printstatus=False, nprocs=None):
+        '''
+        Generates and returns the summary table of V1 measurements, including
+        restricted HCP data, regarding the 1-6 degree eccentricity ROI. The
+        resulting dataframe is formatted in a way that is deliberately friendly
+        to seaborn.
+        '''
+        return type(self)._generate_v1_summary_table(self.subjects, self.gender, self.agegroup,
+                                                     surface_area=surface_area,
+                                                     printstatus=printstatus, nprocs=nprocs)
+    @pimms.value
+    def restricted_v1_summary_table(subjects, gender, agegroup):
+        '''
+        restricted_v1_pair_summary_table is a dataframe containing summary data,
+        including restricted HCP data, about the V1 surface area, volume, and
+        thickness for the ROIs examined in the associated paper (i.e., V1
+        limited to 1-6 degrees of eccentricity). In order to access these data,
+        you must have configured neuropythy to have access to the HCP restricted
+        data.
+
+        Note that because this table requires the restricted HCP data, it must be
+        generated when requested (it cannot be stored on a public repository).
+        Accordingly, it may take a substantial amount of time to load this
+        value.
+        '''
+        return VisualPerformanceFieldsDataset._generate_restricted_v1_summary_table(subjects,
+                                                                                    gender,
+                                                                                    agegroup)
+    @staticmethod 
+    def _generate_v1_summary_call(tup):
+        import neuropythy as ny, numpy as np
+        #data = ny.data['visual_performace_fields']
+        data = ny.data['visual_performance_fields_original']
+        subjects = data.subjects
+        skey = data.sector_key[0]
+        CLS = VisualPerformanceFieldsDataset
+        (sid, saprop) = tup
+        sub = data.subjects[sid]
+        sas = []
+        ths = []
+        for h in ['lh','rh']:
+            hem = sub.hemis[h]
+            lbl = hem.prop('visual_area') == 1
+            sas.append(hem.prop(saprop)[lbl])
+            ths.append(hem.prop('thickness')[lbl])
+        area = np.nansum(np.concatenate(sas))
+        thick = np.nanmean(np.concatenate(ths))
+        return (area, thick)
+    @staticmethod
+    def _generate_v1_summary_table(subjects, surface_area='midgray_surface_area',
+                                   printstatus=False, nprocs=None):
+        '''
+        Generates and returns the summary table of V1 measurements for the
+        entire V1 area as drawn by the raters for the HCP_lines dataset used in
+        this project.
+        '''
+        import neuropythy as ny, os, six, pyrsistent as pyr, multiprocessing as mp, numpy as np
+        subject_list = subjects.keys()
+        nsubs = len(subject_list)
+        f = VisualPerformanceFieldsDataset._generate_v1_summary_call
+        if nprocs is None or nprocs is Ellipsis: nprocs = mp.cpu_count()
+        if nprocs < 2: nprocs = 1
+        dat = ny.auto_dict(None, [])
+        if printstatus:
+            print('V1 Summary Processing blocks:')
+        for ii in np.arange(0, nsubs, nprocs):
+            mx = np.min([nsubs, ii + nprocs])
+            sids = subject_list[ii:mx]
+            if printstatus:
+                print("  * %2d - %3d%% progress" % ((ii + 1)/nsubs * 100, mx/nsubs * 100))
+            with mp.Pool(nprocs) as pool:
+                tups = pool.map(f, [(sid,surface_area) for sid in sids])
+            # add these data into the overall roi table
+            for (sid,tup) in zip(sids,tups):
+                dat['sid'].append(sid)
+                (sa, th) = tup
+                dat['surface_area_cm2'].append(sa / 100.0)
+                dat['mean_thickness_mm'].append(th)
+        return ny.to_dataframe(dat)
+    def generate_v1_summary_table(self, surface_area='midgray_surface_area',
+                                  printstatus=False, nprocs=None):
+        '''
+        Generates and returns the summary table of V1 measurements regarding the
+        full 0-6 degree eccentricity ROI.
+        '''
+        return type(self)._generate_v1_summary_table(self.subjects, surface_area=surface_area,
+                                                     printstatus=printstatus, nprocs=nprocs)
+    @pimms.value
+    def v1_summary_table(subjects, pseudo_path):
+        '''
+        v1_summary_table is a dataframe containing summary data about the V1
+        surface area, volume, and thickness for the ROIs examined in the
+        associated paper (i.e., V1 limited to 0-6 degrees of eccentricity).
+        '''
+        import neuropythy as ny
+        df = ny.load(pseudo_path.local_path('v1_summary_table.csv'))
+        df.set_index(['sid'])
+        return df
+    @staticmethod
+    def _generate_asymmetry_pair_table(subject_list, asymmetry, retinotopy_siblings,
+                                       agegroup, gender,
+                                       suffix='_cumulative'):
+        import neuropythy as ny, pimms, numpy as np
+        pair_data = ny.auto_dict(None, [])
+        sid_to_index = {sid: k for (k,sid) in enumerate(np.sort(subject_list))}
+        # Start by finding the subset of pairs we want to use:
+        mzpairs = retinotopy_siblings['MZ']
+        dzpairs = retinotopy_siblings['DZ']
+        sbpairs = retinotopy_siblings['']
+        # Find all the sibling pairs:
+        sibs = set([tuple(sorted([k,v]))
+                    for pairs in [mzpairs, dzpairs, sbpairs]
+                    for (k,vs) in pairs.items()
+                    for v in (vs if pimms.is_tuple(vs) else [vs])])
+        # Now find unrelated pairs:
+        urpairs = set([(a,b)
+                       for a in subject_list
+                       for b in subject_list
+                       if a < b and (a,b) not in sibs])
+        # The unrelated pairs get limited to age- and gender-matched pairs
+        mzpairs = set([tuple(sorted([k,v]))
+                       for (k,vs) in mzpairs.items()
+                       for v in (vs if pimms.is_tuple(vs) else [vs])
+                       if k in sid_to_index and v in sid_to_index])
+        dzpairs = set([tuple(sorted([k,v]))
+                       for (k,vs) in dzpairs.items()
+                       for v in (vs if pimms.is_tuple(vs) else [vs])
+                       if k in sid_to_index and v in sid_to_index])
+        for (k,pairs) in [('MZ',mzpairs), ('DZ',dzpairs), ('UR',urpairs)]:
+            for (t1,t2) in pairs:
+                (k1,k2) = [sid_to_index.get(t, None) for t in (t1,t2)]
+                if k1 is None or k2 is None: continue
+                pair_data['sid_1'].append(t1)
+                pair_data['sid_2'].append(t2)
+                pair_data['relationship'].append(k)
+                pair_data['same_age'].append(agegroup[t1] == agegroup[t2])
+                pair_data['same_sex'].append(gender[t1] == gender[t2])
+                for col in ['HVA','VMA']:
+                    for (ii,w) in enumerate([10,20,30,40,50]):
+                        pair_data['%s%d_1' % (col,w)].append(asymmetry[col+suffix][ii][k1])
+                        pair_data['%s%d_2' % (col,w)].append(asymmetry[col+suffix][ii][k2])
+        return ny.to_dataframe(pair_data)
+    def generate_asymmetry_pair_table(self, suffix='_cumulative'):
+        '''
+        Yields a dataframe of asymmetry data sorted by pairs. Pair types include MZ (monozygotic
+        twins), DZ (dizygotic twins), and 'UR' (unrelaited pair). This data will fail to load if you
+        have not configured neuropythy to have access to the HCP restricted data.
+
+        The optional argument suffix may be set to '' to calculate instantaneous instead of
+        cumulative ROI asymmetry.
+        '''
+        return type(self)._generate_asymmetry_pair_table(self.subject_list, 
+                                                         self.asymmetry, 
+                                                         self.retinotopy_siblings, 
+                                                         self.agegroup, 
+                                                         self.gender)
+    @pimms.value
+    def asymmetry_pair_table(subject_list, asymmetry, retinotopy_siblings, agegroup, gender):
+        '''
+        asymmetry_pair_table is a dataframe of asymmetry data sorted by pairs. Pair types include
+        MZ (monozygotic twins), DZ (dizygotic twins), and 'UR' (unrelaited pair). This data will
+        fail to load if you have not configured neuropythy to have access to the HCP restricted
+        data.
+        '''
+        return VisualPerformanceFieldsDataset._generate_asymmetry_pair_table(
+            subject_list, asymmetry, retinotopy_siblings, agegroup, gender)
+
+neuropythy.datasets.core.add_dataset('visual_performance_fields_original',
                                      lambda:VisualPerformanceFieldsDataset())
